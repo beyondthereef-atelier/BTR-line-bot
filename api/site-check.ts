@@ -51,7 +51,7 @@ const CHECKS: Check[] = [
   {
     path: "/pages/faq",
     label: "よくあるご質問",
-    mustContain: [],
+        mustContain: [{ token: "___TEST_ONLY___", name: "通知テスト用" }],
     minBytes: 30000,
   },
   {
