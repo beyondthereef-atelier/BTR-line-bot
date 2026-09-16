@@ -153,7 +153,9 @@ export async function handleText(
   }
 
   // 担当者対応中はボットは沈黙し、スタッフの手動対応に任せる。
-  if (state && state.step === "HANDOFF") {
+  // 終了処理の後の待機中（COOLDOWN）も、「ありがとうございました」等のお礼に
+  // ボットが反応してしまわないよう、同じく沈黙する。
+  if (state && (state.step === "HANDOFF" || state.step === "COOLDOWN")) {
     return;
   }
 
@@ -258,8 +260,8 @@ export async function handleImage(
   const state = await getState(userId);
   if (!state) { await reply(categoryMenu()); return; }
 
-  // 担当者対応中は画像にも反応しない
-  if (state.step === "HANDOFF" || state.step === "HANDOFF_CONFIRM") { return; }
+  // 担当者対応中・終了処理後の待機中は画像にも反応しない
+  if (state.step === "HANDOFF" || state.step === "HANDOFF_CONFIRM" || state.step === "COOLDOWN") { return; }
 
   const photoSteps = ["P_PHOTO", "R_PHOTO"];
   if (photoSteps.includes(state.step)) {
@@ -288,8 +290,8 @@ export async function handleOther(
 
   const state = await getState(userId);
 
-  // 担当者対応中は沈黙
-  if (state && (state.step === "HANDOFF" || state.step === "HANDOFF_CONFIRM")) { return; }
+  // 担当者対応中・終了処理後の待機中は沈黙
+  if (state && (state.step === "HANDOFF" || state.step === "HANDOFF_CONFIRM" || state.step === "COOLDOWN")) { return; }
 
   // 写真ステップなら、改めて画像かスキップを促す
   if (state && (state.step === "P_PHOTO" || state.step === "R_PHOTO")) {

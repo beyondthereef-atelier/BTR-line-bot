@@ -18,7 +18,9 @@ export type Step =
   // 担当者対応中（ボットは沈黙）
   | "HANDOFF"
   // 担当者対応中に「お問い合わせ」等が押されたときの確認ステップ
-  | "HANDOFF_CONFIRM";
+  | "HANDOFF_CONFIRM"
+  // 終了処理の後、ボットが黙ったまま待つ期間
+  | "COOLDOWN";
 
 export interface UserState {
   step: Step;
@@ -29,6 +31,10 @@ export interface UserState {
 const TTL = 60 * 60 * 24;
 // 担当者対応中は長め（7日間）に保持。お客様が再度「お問い合わせ」等を送るまでボットは沈黙する。
 export const HANDOFF_TTL = 60 * 60 * 24 * 7;
+// 終了処理の後、ボットが黙ったまま待つ期間（2日間）。
+// 対応終了の直後にお客様が送ってくださる「ありがとうございました」に、
+// ボットが新しい問い合わせとして反応してしまうのを防ぐための時間。
+export const COOLDOWN_TTL = 60 * 60 * 24 * 2;
 
 export async function getState(userId: string): Promise<UserState | null> {
   return kv.get<UserState>(`state:${userId}`);
