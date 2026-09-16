@@ -28,12 +28,14 @@ function esc(s: string): string {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }
 
+// サーバー（Vercel）は世界標準時で動いているため、9時間足して日本時間で表示する。
 function fmt(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
+  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${p(jst.getUTCHours())}:${p(jst.getUTCMinutes())}`;
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
