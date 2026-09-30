@@ -277,7 +277,15 @@ export async function handleImage(
       ...state.data,
       photo: driveLink,
     });
+    return;
   }
+
+  // 写真ステップ以外で画像が届いた場合（カテゴリ選択前・入力の途中）は、黙らずに案内を返す。
+  if (state.step === "CATEGORY") {
+    await reply(categoryMenu());
+    return;
+  }
+  await handleOther(client, userId, replyToken);
 }
 
 export async function handleOther(
@@ -296,6 +304,12 @@ export async function handleOther(
   // 写真ステップなら、改めて画像かスキップを促す
   if (state && (state.step === "P_PHOTO" || state.step === "R_PHOTO")) {
     await reply(askPhoto());
+    return;
+  }
+
+  // カテゴリ選択前に動画・スタンプ等が届いた場合は、カテゴリメニューを出す。
+  if (state && state.step === "CATEGORY") {
+    await reply(categoryMenu());
     return;
   }
 
