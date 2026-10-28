@@ -87,6 +87,34 @@ async function pushLine(text: string): Promise<boolean> {
   return r.ok;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * ページを開く。503・429 などの一時的なエラーや接続失敗のときは、
+ * 少し待って開き直す（2026-10-28 に、一瞬の 503 で空振りの通知が出たため）。
+ * 待ち時間は合計12秒まで（関数の時間上限が30秒のため）。
+ */
+const RETRY_WAITS = [4000, 8000];
+
+async function fetchPage(url: string): Promise<{ status: number; body: string }> {
+  for (let i = 0; ; i++) {
+    let status = 0;
+    let body = "";
+    try {
+      const r = await fetch(url, {
+        headers: { "User-Agent": "BTR-site-check/1.0" },
+      });
+      status = r.status;
+      body = await r.text();
+    } catch {
+      status = 0;
+    }
+    const temporary = status === 0 || status === 429 || status >= 500;
+    if (!temporary || i >= RETRY_WAITS.length) return { status, body };
+    await sleep(RETRY_WAITS[i]);
+  }
+}
+
 function themeName(html: string): string | null {
   const m = html.match(/Shopify\.theme = (\{.*?\});/s);
   if (!m) return null;
@@ -99,25 +127,22 @@ function themeName(html: string): string | null {
 
 export default async function handler(_req: IncomingMessage, res: ServerResponse) {
   const problems: string[] = [];
+  const problemUrls: string[] = [];
   const checked: string[] = [];
   let theme: string | null = null;
 
   for (const chk of CHECKS) {
-    let status = 0;
-    let body = "";
-    try {
-      const r = await fetch(BASE + chk.path, {
-        headers: { "User-Agent": "BTR-site-check/1.0" },
-      });
-      status = r.status;
-      body = await r.text();
-    } catch {
+    const { status, body } = await fetchPage(BASE + chk.path);
+
+    if (status === 0) {
       problems.push(`${chk.label} に接続できません`);
+      problemUrls.push(BASE + chk.path);
       continue;
     }
 
     if (status !== 200) {
       problems.push(`${chk.label} が開けません（応答 ${status}）`);
+      problemUrls.push(BASE + chk.path);
       continue;
     }
 
@@ -130,10 +155,12 @@ export default async function handler(_req: IncomingMessage, res: ServerResponse
 
     if (missing.length > 0) {
       problems.push(`${chk.label} から消えています → ${missing.join("、")}`);
+      problemUrls.push(BASE + chk.path);
     } else if (size < chk.minBytes) {
       problems.push(
         `${chk.label} の中身が異常に少ないです（${size.toLocaleString()}バイト）`
       );
+      problemUrls.push(BASE + chk.path);
     } else {
       checked.push(`OK ${chk.label}`);
     }
@@ -152,7 +179,7 @@ export default async function handler(_req: IncomingMessage, res: ServerResponse
         problems.map((p) => `・${p}`).join("\n") +
         `\n\n公開テーマ: ${theme ?? "不明"}\n\n` +
         "直前にテーマを公開・編集した人に確認してください。\n" +
-        `${BASE}/pages/contact`;
+        problemUrls.join("\n");
       notified = await pushLine(msg);
       if (notified) await kv.set(NOTIFY_KEY, fingerprint, { ex: NOTIFY_TTL });
     }
