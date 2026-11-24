@@ -165,7 +165,7 @@ export function askEmail(): Message {
 export function askOrderNo(): Message {
   return {
     type: "text",
-    text: "ご注文番号（4桁）を入力してください。\n（例：1234）\n（わからない場合は下のボタンでスキップできます）",
+    text: "ご注文番号（4桁または5桁）を入力してください。\n（例：1234）\n（わからない場合は下のボタンでスキップできます）",
     quickReply: {
       items: [
         { type: "action", action: { type: "message", label: "スキップ", text: "スキップ" } },
