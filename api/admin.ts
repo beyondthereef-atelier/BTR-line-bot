@@ -38,6 +38,27 @@ function fmt(iso: string): string {
   return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${p(jst.getUTCHours())}:${p(jst.getUTCMinutes())}`;
 }
 
+// 担当者対応中・待機中のステップ（これ以外＝ボットとやりとり中）
+const BOT_STEPS_EXCLUDED = ["HANDOFF", "HANDOFF_CONFIRM", "COOLDOWN"];
+// ボットとやりとり中の状態の保存期間（src/state.ts の TTL と同じ 24時間）
+const BOT_TTL = 60 * 60 * 24;
+
+// LINE のプロフィール名（お客様が入力したお名前ではなく、LINE に表示される名前）
+async function lineDisplayName(userId: string): Promise<string> {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "";
+  if (!token || !userId) return "";
+  try {
+    const r = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(userId)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return "";
+    const j = (await r.json()) as { displayName?: string };
+    return j.displayName ?? "";
+  } catch {
+    return "";
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -54,7 +75,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const user = params.get("user");
     const action = params.get("action") ?? "finish";
 
-    if (user) {
+    if (user && action === "takeover") {
+      // 2026-11-26 ボットを無視して話し続けるお客様を、CS が手で担当者モードにする。
+      // お客様には何も送らない（この後 CS が管理画面から手で返信する）
+      const key = `state:${user}`;
+      const st = await kv.get<StoredState>(key);
+      if (!st || !BOT_STEPS_EXCLUDED.includes(st.step ?? "")) {
+        const lineName = (await lineDisplayName(user)) || st?.data?.name || "";
+        await kv.set(key, {
+          step: "HANDOFF",
+          category: st?.category || "手動で切り替え",
+          data: { name: lineName, handoffAt: new Date().toISOString() },
+        }, { ex: HANDOFF_TTL });
+      }
+    } else if (user) {
       const key = `state:${user}`;
       const st = await kv.get<StoredState>(key);
       if (st) {
@@ -83,6 +117,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   // 担当者対応中(HANDOFF)と、終了処理後の待機中(COOLDOWN)のユーザーを集める
   const active: Row[] = [];
   const waiting: Row[] = [];
+  const botKeys: string[] = [];
   let cursor = 0;
   let guard = 0;
   do {
@@ -100,18 +135,33 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       };
       if (st.step === "HANDOFF" || st.step === "HANDOFF_CONFIRM") active.push(row);
       else if (st.step === "COOLDOWN") waiting.push(row);
+      else botKeys.push(k);
     }
   } while (cursor !== 0 && ++guard < 50);
+
+  // ボットとやりとり中のお客様：LINE の名前と、最後にボットが返した時刻（残り保存期間から逆算）
+  const bot: Row[] = await Promise.all(botKeys.map(async (k) => {
+    const userId = k.replace(/^state:/, "");
+    const [name, ttl] = await Promise.all([lineDisplayName(userId), kv.ttl(k)]);
+    const at = ttl > 0 ? new Date(Date.now() - (BOT_TTL - ttl) * 1000).toISOString() : "";
+    return { userId, name, category: "", at, returnAt: "" };
+  }));
+  bot.sort((a, b) => b.at.localeCompare(a.at));
 
   active.sort((a, b) => b.at.localeCompare(a.at));
   waiting.sort((a, b) => a.returnAt.localeCompare(b.returnAt));
 
-  const card = (h: Row, action: "finish" | "reopen") => {
-    const label = action === "finish" ? "対応を終了" : "対応に戻す";
+  const card = (h: Row, action: "finish" | "reopen" | "takeover") => {
+    const label = action === "finish" ? "対応を終了" : action === "reopen" ? "対応に戻す" : "担当者モードにする";
     const who = esc(h.name || "このお客様");
     const confirm = action === "finish"
       ? `${who}の担当者対応を終了しますか？\\n（2日間はボットが黙って待ち、その後ボットモードに戻ります）`
-      : `${who}を担当者対応中に戻しますか？\\n（ボットは沈黙したままになります）`;
+      : action === "reopen"
+      ? `${who}を担当者対応中に戻しますか？\\n（ボットは沈黙したままになります）`
+      : `${who}を担当者モードにしますか？\\n（ボットが黙ります。お客様には何も送られません）`;
+    const meta = action === "takeover"
+      ? (h.at ? `最後のやりとり ${esc(fmt(h.at))} ごろ` : "")
+      : `${esc(h.category)}${h.at ? " ・ " + esc(fmt(h.at)) : ""}`;
     const ret = action === "reopen" && h.returnAt
       ? `<div class="ret">${esc(fmt(h.returnAt))} にボットモードに戻ります</div>`
       : "";
@@ -119,14 +169,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     <div class="card">
       <div class="info">
         <div class="name">${esc(h.name || "（お名前未取得）")}</div>
-        <div class="meta">${esc(h.category)}${h.at ? " ・ " + esc(fmt(h.at)) : ""}</div>
+        <div class="meta">${meta}</div>
         ${ret}
       </div>
       <form method="POST" action="/api/admin" onsubmit="return confirm('${confirm}')">
         <input type="hidden" name="key" value="${esc(secret)}">
         <input type="hidden" name="user" value="${esc(h.userId)}">
         <input type="hidden" name="action" value="${action}">
-        <button type="submit" class="${action === "reopen" ? "ghost" : ""}">${label}</button>
+        <button type="submit" class="${action === "reopen" ? "ghost" : action === "takeover" ? "warm" : ""}">${label}</button>
       </form>
     </div>`;
   };
@@ -137,6 +187,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const waitingRows = waiting.length
     ? waiting.map((h) => card(h, "reopen")).join("")
     : `<p class="empty">待機中のお客様はいません。</p>`;
+
+  const botRows = bot.length
+    ? bot.map((h) => card(h, "takeover")).join("")
+    : `<p class="empty">ボットとやりとり中のお客様はいません。</p>`;
 
   const html = `<!DOCTYPE html>
 <html lang="ja"><head>
@@ -157,6 +211,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   .meta { color: #7f7f7f; font-size: 13px; margin-top: 2px; }
   .ret { color: #2E75B6; font-size: 13px; font-weight: 700; margin-top: 4px; }
   button { background: #1F4E79; color: #fff; border: none; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  button.warm { background: #B0844E; }
   button.ghost { background: #fff; color: #1F4E79; border: 1px solid #1F4E79; }
   button:active { opacity: .8; }
   .empty { color: #7f7f7f; text-align: center; padding: 28px 0; }
@@ -176,6 +231,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   <h2>対応済み（ボット待機中）（${waiting.length}件）</h2>
   <p class="sub">ボットが黙って待っている状態です。お礼ではなく新しいご質問が届いたら「対応に戻す」を押してください</p>
   ${waitingRows}
+
+  <h2>ボットとやりとり中（${bot.length}件）</h2>
+  <p class="sub">ボットの案内に答えず話し続けているお客様に手で返信する時は、先に「担当者モードにする」を押してください（ボットが黙ります）。この24時間にボットが返したお客様だけが出ます</p>
+  ${botRows}
 </div></body></html>`;
 
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
